@@ -1,0 +1,69 @@
+FROM debian:bookworm-slim AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG APP_NAME=pygato
+ARG ENTRY=main.py
+ARG TARGET=both
+
+ENV UV_CACHE_DIR=/root/.cache/uv \
+    PATH=/root/.local/bin:${PATH}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl git build-essential pkg-config \
+      python3 python3-venv python3-pip \
+      patchelf zstd file \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install uv (Python packaging/runtime)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+WORKDIR /src
+COPY . /src
+
+# Build artifacts with uv-run PyInstaller/Nuitka
+RUN set -euo pipefail; \
+    mkdir -p /work/pyinstaller /work/nuitka /out; \
+    if [ "$TARGET" = "pyinstaller" ] || [ "$TARGET" = "both" ]; then \
+      echo "[pyinstaller] Building ${APP_NAME} from ${ENTRY}..."; \
+      if [ -f pygato.spec ]; then \
+        uv run pyinstaller --noconfirm --clean --distpath /work/pyinstaller --workpath /work/pyi-build pygato.spec; \
+      else \
+        uv run pyinstaller \
+          --name "$APP_NAME" \
+          --onefile \
+          --windowed \
+          --noconfirm \
+          --clean \
+          --distpath /work/pyinstaller \
+          --workpath /work/pyi-build \
+          --paths /src \
+          --collect-all pygame \
+          --collect-submodules pygame \
+          --hidden-import=pygame \
+          --hidden-import=pygame.freetype \
+          --hidden-import=pygame._sdl2 \
+          "$ENTRY"; \
+      fi; \
+      mkdir -p /out/pyinstaller; \
+      cp -a /work/pyinstaller/. /out/pyinstaller/; \
+      echo "[pyinstaller] Done."; \
+    fi; \
+    if [ "$TARGET" = "nuitka" ] || [ "$TARGET" = "both" ]; then \
+      echo "[nuitka] Building ${APP_NAME} from ${ENTRY}..."; \
+      uv run nuitka \
+        --onefile \
+        --standalone \
+        --assume-yes-for-downloads \
+        --nofollow-import-to=tests \
+        --output-dir=/work/nuitka \
+        --remove-output \
+        --output-filename="$APP_NAME" \
+        "$ENTRY"; \
+      mkdir -p /out/nuitka; \
+      cp -a /work/nuitka/. /out/nuitka/; \
+      echo "[nuitka] Done."; \
+    fi
+
+FROM scratch AS artifact
+COPY --from=builder /out /

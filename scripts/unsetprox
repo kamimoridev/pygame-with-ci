@@ -1,0 +1,4 @@
+set -u http_proxy
+set -u https_proxy
+set -u ftp_proxy
+set -u all_proxy
