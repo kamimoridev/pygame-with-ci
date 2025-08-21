@@ -1,89 +1,46 @@
+
 # syntax=docker/dockerfile:1.7
-ARG PYWINE_TAG=3.13
-FROM tobix/pywine:${PYWINE_TAG} AS builder
-
-ARG DEBIAN_FRONTEND=noninteractive
-ARG UV_WIN_VERSION=0.6.2
-ARG PBS_RELEASE=20250115
-ARG PY_VERSION=3.12.8
-ARG MINGIT_VERSION=2.47.1.windows.1
-
-# Параметры приложения
-ARG APP_NAME=pygato
-ARG ENTRY=main.py
-ARG PYINSTALLER_ARGS="--onefile --windowed --noconfirm"
+FROM tobix/pywine AS builder
 
 ENV WINEDEBUG=-all \
     WINEPREFIX=/root/.wine \
     UV_EXE=C:\\uv\\uv.exe \
-    UVX_EXE=C:\\uv\\uvx.exe \
-    WINROOT=C:\\win \
-    WINPY=C:\\win\\python \
-    WINGIT=C:\\win\\git \
-    APPDIR=C:\\app \
-    # ключевое: куда uv будет создавать проектное окружение
     UV_PROJECT_ENVIRONMENT=C:\\app\\.venv-win \
-    # фиксируем интерпретатор для uv
-    UV_PYTHON=C:\\win\\python\\python.exe
+    UV_PYTHON=C:\\win\\python\\python.exe \
+    WINEPATH=C:\\win\\git\\cmd \
+    APP_NAME=pygato \
+    ENTRY=main.py \
+    PYINSTALLER_ARGS="--onefile --windowed --noconfirm"
 
-USER root
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# Инструменты
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils libarchive-tools jq \
+ && apt-get install -y --no-install-recommends ca-certificates curl unzip libarchive-tools \
  && rm -rf /var/lib/apt/lists/*
 
-# UV (Windows) -> C:\uv
-RUN set -eux; \
-    mkdir -p /root/.wine/drive_c/uv; \
-    curl -fL "https://github.com/astral-sh/uv/releases/download/${UV_WIN_VERSION}/uv-x86_64-pc-windows-msvc.zip" -o /tmp/uv.zip; \
-    unzip -j /tmp/uv.zip uv.exe  -d /root/.wine/drive_c/uv; \
-    unzip -j /tmp/uv.zip uvx.exe -d /root/.wine/drive_c/uv || true; \
-    rm -f /tmp/uv.zip; \
-    wine cmd /c "%UV_EXE% --version"
+RUN mkdir -p /root/.wine/drive_c/uv /root/.wine/drive_c/win/python /root/.wine/drive_c/win/git \
+ && curl -fsSL https://github.com/astral-sh/uv/releases/download/0.6.2/uv-x86_64-pc-windows-msvc.zip -o /tmp/uv.zip \
+ && unzip -j -q /tmp/uv.zip uv.exe -d /root/.wine/drive_c/uv \
+ && rm -f /tmp/uv.zip \
+ && curl -fsSL https://github.com/astral-sh/python-build-standalone/releases/download/20250115/cpython-3.12.8+20250115-x86_64-pc-windows-msvc-install_only_stripped.tar.gz -o /tmp/python.tar.gz \
+ && bsdtar -xf /tmp/python.tar.gz -C /root/.wine/drive_c/win/python --strip-components 1 \
+ && rm -f /tmp/python.tar.gz \
+ && curl -fsSL https://github.com/git-for-windows/git/releases/download/v2.51.0.windows.1/MinGit-2.51.0-64-bit.zip -o /tmp/git.zip \
+ && unzip -q /tmp/git.zip -d /root/.wine/drive_c/win/git \
+ && rm -f /tmp/git.zip
 
-# Windows Python (PBS) -> C:\win\python (важно срезать верхний каталог)
-RUN set -eux; \
-    mkdir -p /root/.wine/drive_c/win/python; \
-    curl -fL "https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/cpython-${PY_VERSION}+${PBS_RELEASE}-x86_64-pc-windows-msvc-install_only_stripped.tar.gz" -o /tmp/python.tar.gz; \
-    bsdtar -xf /tmp/python.tar.gz -C /root/.wine/drive_c/win/python --strip-components 1; \
-    rm -f /tmp/python.tar.gz; \
-    wine cmd /c "%WINPY%\\python.exe -V"
+WORKDIR /root/.wine/drive_c/app
 
-# MinGit -> C:\win\git (для git-зависимостей)
-RUN set -eux; \
-    mkdir -p /root/.wine/drive_c/win/git; \
-    curl -fL "https://github.com/git-for-windows/git/releases/download/v2.51.0.windows.1/MinGit-2.51.0-64-bit.zip" -o /tmp/git.zip; \
-    unzip -q /tmp/git.zip -d /root/.wine/drive_c/win/git; \
-    rm -f /tmp/git.zip
+COPY pyproject.toml uv.lock* ./
 
-# Исходники в C:\app
-WORKDIR /src
-COPY . /src
-RUN mkdir -p /root/.wine/drive_c/app && cp -a /src/. /root/.wine/drive_c/app/
+RUN --mount=type=cache,target=/root/.wine/drive_c/users/root/AppData/Local/uv-cache \
+    if [ -f uv.lock ]; then wine "$UV_EXE" sync --frozen; else wine "$UV_EXE" sync; fi
 
-# ВАЖНО: убрать мешающий линуксовый .venv (если случайно попал в COPY)
-RUN rm -rf /root/.wine/drive_c/app/.venv /root/.wine/drive_c/app/.venv-win
+COPY . .
 
-# uv sync по pyproject.toml / uv.lock
-# WINEPATH извне: так uv увидит C:\win\git\cmd для git-зависимостей
-RUN set -eux; \
-    WINEPATH="C:\\win\\git\\cmd" \
-    wine cmd /c "cd /d %APPDIR% && if exist uv.lock ( %UV_EXE% sync --frozen ) else ( %UV_EXE% sync )"
-
-# Сборка EXE: uv run pyinstaller в проектном окружении
-RUN set -eux; \
-    WINEPATH="C:\\win\\git\\cmd" \
-    wine cmd /c "cd /d %APPDIR% && \
-        if exist %APP_NAME%.spec ( \
-            %UV_EXE% run --with pyinstaller -- pyinstaller --distpath %APPDIR%\\dist\\windows\\pyinstaller --workpath %APPDIR%\\build\\pyinstaller --clean %APP_NAME%.spec \
-        ) else ( \
-            %UV_EXE% run --with pyinstaller -- pyinstaller --name ${APP_NAME} --paths %APPDIR% ${PYINSTALLER_ARGS} --distpath %APPDIR%\\dist\\windows\\pyinstaller --workpath %APPDIR%\\build\\pyinstaller %ENTRY% \
-        )"
-
-# Вынести артефакты
-RUN mkdir -p /out/windows && cp -a /root/.wine/drive_c/app/dist/windows/. /out/windows/
+RUN if [ -f "$APP_NAME.spec" ]; then \
+      wine "$UV_EXE" run --with pyinstaller -- pyinstaller --distpath C:\\app\\dist\\windows\\pyinstaller --workpath C:\\app\\build\\pyinstaller --clean "$APP_NAME.spec"; \
+    else \
+      wine "$UV_EXE" run --with pyinstaller -- pyinstaller --name "$APP_NAME" --paths C:\\app $PYINSTALLER_ARGS --distpath C:\\app\\dist\\windows\\pyinstaller --workpath C:\\app\\build\\pyinstaller "$ENTRY"; \
+    fi
 
 FROM scratch AS artifact
-COPY --from=builder /out /
+COPY --from=builder /root/.wine/drive_c/app/dist/windows /windows
